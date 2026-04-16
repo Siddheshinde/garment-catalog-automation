@@ -1,0 +1,19 @@
+# Core Dependencies for Garment Catalog Automation
+
+# Image Processing
+Pillow>=10.0.0
+
+# PDF Generation
+reportlab>=4.0.0
+
+# AI Vision (Google Gemini)
+google-generativeai>=0.3.0
+
+# Optional: Advanced image processing
+opencv-python>=4.8.0
+
+# Optional: Background removal (if needed)
+# rembg>=2.0.50
+
+# Installation command:
+# pip install -r requirements.txt
