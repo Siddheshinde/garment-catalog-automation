@@ -1,6 +1,7 @@
 import sys
 import shutil
 import importlib
+import datetime
 from pathlib import Path
 
 APP_ROOT   = Path(__file__).parent.resolve()
@@ -15,7 +16,7 @@ for _d in [INPUT_DIR, STAGE_DIR, OUTPUT_DIR]:
 USE_UI_DETAILS = True
 
 
-def generate_catalog(pages: list) -> str:
+def generate_catalog(pages: list, title: str = "") -> tuple[str, list[str]]:
     if not pages:
         raise ValueError("No garment pages provided.")
 
@@ -28,6 +29,11 @@ def generate_catalog(pages: list) -> str:
     backend = _load_backend()
     _patch_backend_paths(backend)
     backend.setup_folders()
+
+    # use title as filename, fall back to a timestamped default
+    safe_name = _safe_filename(title) if title.strip() else \
+        f"catalog_{datetime.datetime.now():%Y%m%d_%H%M%S}"
+    backend.FINAL_PDF = str(OUTPUT_DIR / f"{safe_name}.pdf")
 
     model = None if USE_UI_DETAILS else backend.setup_gemini()
 
@@ -75,7 +81,25 @@ def generate_catalog(pages: list) -> str:
     if not pdf_path.exists():
         raise RuntimeError(f"PDF expected at {pdf_path} but was not created.")
 
-    return str(pdf_path)
+    # save a small thumbnail next to the PDF so the sidebar can show a preview
+    _save_thumbnail(layout_paths[0], str(OUTPUT_DIR / f"{safe_name}_thumb.jpg"))
+
+    return str(pdf_path), layout_paths
+
+
+def _safe_filename(text: str) -> str:
+    cleaned = "".join(c if c.isalnum() or c in " -_" else "" for c in text).strip()
+    return cleaned.replace(" ", "_") or "catalog"
+
+
+def _save_thumbnail(src_path: str, dst_path: str):
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(src_path)
+        img.thumbnail((300, 200))
+        img.save(dst_path, "JPEG", quality=82)
+    except Exception as e:
+        print(f"[wrapper] thumbnail failed: {e}")
 
 
 def _stage_images(pages: list) -> dict:

@@ -68,6 +68,7 @@ class ImageUploadBox(QWidget):
         self.rotation_angle = 0
         self.setFixedSize(160, 230)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptDrops(True)
         self._build_ui()
 
     def _build_ui(self):
@@ -161,6 +162,24 @@ class ImageUploadBox(QWidget):
             }}
         """)
 
+    def _apply_drag_frame_style(self):
+        self.frame.setStyleSheet(f"""
+            QFrame#uploadFrame {{
+                border: 2px solid {COLOR_PRIMARY};
+                border-radius: 10px;
+                background: {COLOR_PRIMARY_LIGHT};
+            }}
+        """)
+
+    def _apply_loaded_frame_style(self):
+        self.frame.setStyleSheet(f"""
+            QFrame#uploadFrame {{
+                border: 2px solid {COLOR_PRIMARY};
+                border-radius: 10px;
+                background: {COLOR_SURFACE};
+            }}
+        """)
+
     def _show_plus(self):
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("＋")
@@ -181,13 +200,7 @@ class ImageUploadBox(QWidget):
 
         self._update_preview()
         self.preview_label.setStyleSheet("border: none; background: transparent;")
-        self.frame.setStyleSheet(f"""
-            QFrame#uploadFrame {{
-                border: 2px solid {COLOR_PRIMARY};
-                border-radius: 10px;
-                background: {COLOR_SURFACE};
-            }}
-        """)
+        self._apply_loaded_frame_style()
         self.rotation_container.show()
 
     def _update_preview(self):
@@ -217,6 +230,8 @@ class ImageUploadBox(QWidget):
         self.angle_label.setText(f"{value}°")
         self._update_preview()
 
+    # ── mouse click ───────────────────────────────────────────────────────────
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._open_file_dialog()
@@ -228,6 +243,37 @@ class ImageUploadBox(QWidget):
         )
         if path:
             self._accept(path)
+
+    # ── drag & drop ───────────────────────────────────────────────────────────
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            path = event.mimeData().urls()[0].toLocalFile()
+            if path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                event.acceptProposedAction()
+                self._apply_drag_frame_style()
+                return
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        if self.image_path is None:
+            self._apply_default_frame_style()
+        else:
+            self._apply_loaded_frame_style()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                self._accept(path)
+                event.acceptProposedAction()
+                return
+        event.ignore()
+        if self.image_path is None:
+            self._apply_default_frame_style()
+
+    # ── file handling ─────────────────────────────────────────────────────────
 
     def _accept(self, src_path: str):
         ext      = Path(src_path).suffix
@@ -404,7 +450,7 @@ class GarmentPageCard(QFrame):
 class CatalogHistoryItem(QFrame):
     open_requested = pyqtSignal(str)
 
-    def __init__(self, pdf_path: str, parent=None):
+    def __init__(self, pdf_path: str, thumb_path: str = "", parent=None):
         super().__init__(parent)
         self.pdf_path = pdf_path
         name = Path(pdf_path).stem.replace("_", " ").title()
@@ -425,19 +471,30 @@ class CatalogHistoryItem(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 8)
-        lay.setSpacing(2)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(4)
 
-        icon = QLabel("📄")
-        icon.setStyleSheet("font-size: 18px; border: none;")
+        if thumb_path and Path(thumb_path).exists():
+            img_lbl = QLabel()
+            pix = QPixmap(thumb_path).scaled(
+                180, 110,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            img_lbl.setPixmap(pix)
+            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            img_lbl.setStyleSheet("border: none;")
+            lay.addWidget(img_lbl)
+        else:
+            icon = QLabel("📄")
+            icon.setStyleSheet("font-size: 18px; border: none;")
+            lay.addWidget(icon)
 
         title = QLabel(name)
         title.setStyleSheet(
             f"color: {COLOR_TEXT}; font-size: 11px; font-weight: 600; border: none;"
         )
         title.setWordWrap(True)
-
-        lay.addWidget(icon)
         lay.addWidget(title)
 
     def mousePressEvent(self, e):

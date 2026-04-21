@@ -7,9 +7,10 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QLabel, QLineEdit, QScrollArea,
-    QFrame, QMessageBox,
+    QFrame, QMessageBox, QFileDialog, QDialog,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QShortcut, QKeySequence, QPixmap
 
 from widgets import (
     GarmentPageCard, CatalogHistoryItem,
@@ -22,17 +23,18 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 class CatalogWorker(QThread):
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(str, list)  # (pdf_path, layout_paths)
     failed   = pyqtSignal(str)
 
-    def __init__(self, pages: list[dict]):
+    def __init__(self, pages: list[dict], title: str = ""):
         super().__init__()
         self.pages = pages
+        self.title = title
 
     def run(self):
         try:
-            pdf_path = generate_catalog(self.pages)
-            self.finished.emit(pdf_path)
+            pdf_path, layout_paths = generate_catalog(self.pages, self.title)
+            self.finished.emit(pdf_path, layout_paths)
         except Exception as e:
             full_error = traceback.format_exc()
             self.failed.emit(f"{e}\n\n--- Full traceback ---\n{full_error}")
@@ -108,14 +110,15 @@ class Sidebar(QFrame):
         if pdfs:
             self.empty_label.hide()
         for pdf in pdfs[:10]:
-            self._add_item(str(pdf))
+            thumb = OUTPUT_DIR / f"{pdf.stem}_thumb.jpg"
+            self._add_item(str(pdf), str(thumb) if thumb.exists() else "")
 
-    def add_catalog(self, pdf_path: str):
+    def add_catalog(self, pdf_path: str, thumb_path: str = ""):
         self.empty_label.hide()
-        self._add_item(pdf_path, prepend=True)
+        self._add_item(pdf_path, thumb_path, prepend=True)
 
-    def _add_item(self, pdf_path: str, prepend: bool = False):
-        item = CatalogHistoryItem(pdf_path)
+    def _add_item(self, pdf_path: str, thumb_path: str = "", prepend: bool = False):
+        item = CatalogHistoryItem(pdf_path, thumb_path)
         item.open_requested.connect(self._open_pdf)
         if prepend:
             self.history_layout.insertWidget(0, item)
@@ -137,13 +140,14 @@ class Sidebar(QFrame):
 
 
 class WorkArea(QWidget):
-    catalog_generated = pyqtSignal(str)
+    catalog_generated = pyqtSignal(str, str)  # (pdf_path, thumb_path)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background: {BG};")
         self._cards: list[GarmentPageCard] = []
         self._worker = None
+        self._toast  = None
         self._build()
 
     def _build(self):
@@ -213,11 +217,9 @@ class WorkArea(QWidget):
         bottom.setStyleSheet(f"background: {WHITE}; border-top: 1px solid {BORDER};")
         bottom_lay = QHBoxLayout(bottom)
         bottom_lay.setContentsMargins(28, 0, 28, 0)
+        bottom_lay.setSpacing(10)
 
-        self.add_page_btn = QPushButton("＋  Add Garment")
-        self.add_page_btn.setFixedHeight(38)
-        self.add_page_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.add_page_btn.setStyleSheet(f"""
+        btn_style = f"""
             QPushButton {{
                 background: transparent;
                 color: {ACCENT};
@@ -227,16 +229,26 @@ class WorkArea(QWidget):
                 font-size: 13px;
                 font-weight: 600;
             }}
-            QPushButton:hover {{
-                background: #EFF6FF;
-            }}
-        """)
+            QPushButton:hover {{ background: #EFF6FF; }}
+        """
+
+        self.add_page_btn = QPushButton("＋  Add Garment")
+        self.add_page_btn.setFixedHeight(38)
+        self.add_page_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_page_btn.setStyleSheet(btn_style)
         self.add_page_btn.clicked.connect(self._add_card)
+
+        self.import_btn = QPushButton("📁  Import Folder")
+        self.import_btn.setFixedHeight(38)
+        self.import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_btn.setStyleSheet(btn_style)
+        self.import_btn.clicked.connect(self._batch_import)
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet(f"color: {SUBTEXT}; font-size: 12px;")
 
         bottom_lay.addWidget(self.add_page_btn)
+        bottom_lay.addWidget(self.import_btn)
         bottom_lay.addStretch()
         bottom_lay.addWidget(self.status_label)
 
@@ -244,11 +256,24 @@ class WorkArea(QWidget):
         root.addWidget(self.scroll, 1)
         root.addWidget(bottom)
 
+        # Ctrl+Enter triggers generate
+        shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
+        shortcut.activated.connect(self._on_generate)
+
         self._add_card()
 
-    def _add_card(self):
+    def _add_card(self, data: dict | None = None):
         card = GarmentPageCard(len(self._cards) + 1)
         card.remove_requested.connect(self._remove_card)
+
+        if data:
+            card.style_input.setText(data.get("style", ""))
+            card.fabric_input.setText(data.get("fabric", ""))
+            card.gsm_input.setText(data.get("gsm", ""))
+            for view, path in data.get("images", {}).items():
+                if path and Path(path).exists() and view in card.boxes:
+                    card.boxes[view]._accept(path)
+
         self._cards.append(card)
         self.cards_layout.addWidget(card)
         self._update_status()
@@ -262,11 +287,17 @@ class WorkArea(QWidget):
         if len(self._cards) == 1:
             QMessageBox.information(self, "Cannot Remove", "At least one garment page is required.")
             return
+
+        saved_data  = card.get_data()
+        saved_index = self._cards.index(card)
+
         self._cards.remove(card)
         self.cards_layout.removeWidget(card)
         card.deleteLater()
         self._renumber_cards()
         self._update_status()
+
+        self._show_undo_toast(f"Garment {saved_index + 1} removed", saved_data, saved_index)
 
     def _renumber_cards(self):
         for i, card in enumerate(self._cards, 1):
@@ -275,6 +306,81 @@ class WorkArea(QWidget):
     def _update_status(self):
         n = len(self._cards)
         self.status_label.setText(f"{n} garment{'s' if n != 1 else ''} • Ready to generate")
+
+    def _show_undo_toast(self, message: str, data: dict, index: int):
+        if self._toast:
+            self._toast.hide()
+            self._toast.deleteLater()
+
+        self._toast = _Toast(message, self)
+        self._toast.undo_clicked.connect(lambda: self._undo_remove(data, index))
+        self._toast.reposition(self.width(), self.height())
+        self._toast.show()
+        self._toast.raise_()
+
+    def _undo_remove(self, data: dict, index: int):
+        # insert a fresh card at the original position with the saved data
+        card = GarmentPageCard(index + 1)
+        card.remove_requested.connect(self._remove_card)
+        card.style_input.setText(data.get("style", ""))
+        card.fabric_input.setText(data.get("fabric", ""))
+        card.gsm_input.setText(data.get("gsm", ""))
+        for view, path in data.get("images", {}).items():
+            if path and Path(path).exists() and view in card.boxes:
+                card.boxes[view]._accept(path)
+
+        self._cards.insert(index, card)
+        self.cards_layout.insertWidget(index, card)
+        self._renumber_cards()
+        self._update_status()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._toast and self._toast.isVisible():
+            self._toast.reposition(self.width(), self.height())
+
+    def _batch_import(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder with Garment Images")
+        if not folder:
+            return
+
+        valid_exts = {".jpg", ".jpeg", ".png", ".webp"}
+        groups: dict[str, dict[str, str]] = {}
+
+        for f in sorted(Path(folder).iterdir()):
+            if f.suffix.lower() not in valid_exts:
+                continue
+            stem = f.stem.lower()
+            for view in ("front", "back", "design"):
+                if stem.endswith(f"_{view}") or stem.endswith(f"-{view}"):
+                    prefix = stem[: -(len(view) + 1)]
+                    groups.setdefault(prefix, {})[view] = str(f)
+                    break
+
+        if not groups:
+            QMessageBox.information(
+                self, "No Images Found",
+                "No files matching *_front.*, *_back.*, or *_design.* were found in that folder."
+            )
+            return
+
+        # clear existing cards only if none of them have images yet
+        if all(c.is_empty() for c in self._cards):
+            for card in self._cards[:]:
+                self.cards_layout.removeWidget(card)
+                card.deleteLater()
+            self._cards.clear()
+
+        for views in groups.values():
+            card = GarmentPageCard(len(self._cards) + 1)
+            card.remove_requested.connect(self._remove_card)
+            for view, path in views.items():
+                if view in card.boxes:
+                    card.boxes[view]._accept(path)
+            self._cards.append(card)
+            self.cards_layout.addWidget(card)
+
+        self._update_status()
 
     def _on_generate(self):
         pages = [c.get_data() for c in self._cards]
@@ -288,18 +394,21 @@ class WorkArea(QWidget):
         self.gen_btn.setText("  ⏳  Generating…")
         self.status_label.setText("Processing images…")
 
-        self._worker = CatalogWorker(pages)
+        title = self.title_input.text().strip()
+        self._worker = CatalogWorker(pages, title)
         self._worker.finished.connect(self._on_success)
         self._worker.failed.connect(self._on_failure)
         self._worker.start()
 
-    def _on_success(self, pdf_path: str):
+    def _on_success(self, pdf_path: str, layout_paths: list):
         self.gen_btn.setEnabled(True)
         self.gen_btn.setText("  ⬇  Generate PDF")
         self.status_label.setText("✓ Catalog generated!")
-        self.catalog_generated.emit(pdf_path)
 
-        dlg = _SuccessDialog(pdf_path, self)
+        thumb_path = layout_paths[0] if layout_paths else ""
+        self.catalog_generated.emit(pdf_path, thumb_path)
+
+        dlg = _SuccessDialog(pdf_path, layout_paths, self)
         dlg.exec()
 
     def _on_failure(self, error: str):
@@ -327,10 +436,145 @@ class WorkArea(QWidget):
         """
 
 
-class _SuccessDialog(QMessageBox):
-    def __init__(self, pdf_path: str, parent=None):
+class _Toast(QFrame):
+    undo_clicked = pyqtSignal()
+
+    def __init__(self, message: str, parent=None):
         super().__init__(parent)
-        self._path = pdf_path
+        self.setObjectName("toast")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("""
+            QFrame#toast {
+                background: #1E1E2E;
+                border-radius: 8px;
+            }
+        """)
+        self.setFixedHeight(44)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 0, 12, 0)
+        lay.setSpacing(12)
+
+        msg = QLabel(message)
+        msg.setStyleSheet("color: #E2E8F0; font-size: 13px; background: transparent;")
+
+        undo_btn = QPushButton("Undo")
+        undo_btn.setFlat(True)
+        undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        undo_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {ACCENT};
+                background: transparent;
+                border: none;
+                font-weight: 700;
+                font-size: 13px;
+                padding: 0 4px;
+            }}
+            QPushButton:hover {{ color: {NAVY_LITE}; }}
+        """)
+        undo_btn.clicked.connect(self._on_undo)
+
+        lay.addWidget(msg)
+        lay.addStretch()
+        lay.addWidget(undo_btn)
+
+        # auto-dismiss after 5 seconds
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+        self._timer.start(5000)
+
+    def _on_undo(self):
+        self._timer.stop()
+        self.undo_clicked.emit()
+        self.hide()
+
+    def reposition(self, parent_w: int, parent_h: int):
+        w = min(360, parent_w - 60)
+        self.setFixedWidth(w)
+        x = (parent_w - w) // 2
+        y = parent_h - 44 - 72  # sit just above the bottom bar (64px) + 8px gap
+        self.move(x, y)
+        self.raise_()
+
+
+class _PreviewDialog(QDialog):
+    def __init__(self, layout_paths: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Catalog Preview")
+        self.setMinimumSize(900, 600)
+        self.resize(1000, 700)
+        self.setStyleSheet(f"background: {BG};")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {BG}; }}")
+
+        content = QWidget()
+        content.setStyleSheet(f"background: {BG};")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 24, 24, 24)
+        content_layout.setSpacing(16)
+
+        for path in layout_paths:
+            pix = QPixmap(path)
+            if pix.isNull():
+                continue
+            lbl = QLabel()
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setPixmap(pix.scaled(
+                900, 580,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+            lbl.setStyleSheet(
+                f"background: {WHITE}; border: 1px solid {BORDER}; border-radius: 8px; padding: 8px;"
+            )
+            content_layout.addWidget(lbl)
+
+        content_layout.addStretch()
+        scroll.setWidget(content)
+
+        bottom = QFrame()
+        bottom.setFixedHeight(56)
+        bottom.setStyleSheet(f"background: {WHITE}; border-top: 1px solid {BORDER};")
+        bottom_lay = QHBoxLayout(bottom)
+        bottom_lay.setContentsMargins(16, 0, 16, 0)
+
+        page_info = QLabel(f"{len(layout_paths)} page{'s' if len(layout_paths) != 1 else ''}")
+        page_info.setStyleSheet(f"color: {SUBTEXT}; font-size: 12px;")
+
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(36)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {NAVY};
+                color: white;
+                border-radius: 7px;
+                padding: 0 20px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {NAVY_LITE}; }}
+        """)
+        close_btn.clicked.connect(self.close)
+
+        bottom_lay.addWidget(page_info)
+        bottom_lay.addStretch()
+        bottom_lay.addWidget(close_btn)
+
+        root.addWidget(scroll, 1)
+        root.addWidget(bottom)
+
+
+class _SuccessDialog(QMessageBox):
+    def __init__(self, pdf_path: str, layout_paths: list[str], parent=None):
+        super().__init__(parent)
+        self._layout_paths = layout_paths
         self.setWindowTitle("Catalog Ready")
         self.setIcon(QMessageBox.Icon.NoIcon)
         self.setText(
@@ -338,11 +582,14 @@ class _SuccessDialog(QMessageBox):
             f"<span style='color:#64748B;font-size:12px;'>{pdf_path}</span>"
         )
         self.setStandardButtons(QMessageBox.StandardButton.Ok)
-        open_btn = self.addButton("Open PDF", QMessageBox.ButtonRole.ActionRole)
-        show_btn = self.addButton("Show in Folder", QMessageBox.ButtonRole.ActionRole)
+
+        open_btn    = self.addButton("Open PDF",       QMessageBox.ButtonRole.ActionRole)
+        show_btn    = self.addButton("Show in Folder", QMessageBox.ButtonRole.ActionRole)
+        preview_btn = self.addButton("Preview Pages",  QMessageBox.ButtonRole.ActionRole)
 
         open_btn.clicked.connect(lambda: self._open(pdf_path))
         show_btn.clicked.connect(lambda: self._reveal(pdf_path))
+        preview_btn.clicked.connect(self._open_preview)
 
         self.setStyleSheet(f"""
             QMessageBox {{ background: {WHITE}; }}
@@ -355,6 +602,10 @@ class _SuccessDialog(QMessageBox):
             }}
             QPushButton:hover {{ background: {NAVY_LITE}; }}
         """)
+
+    def _open_preview(self):
+        dlg = _PreviewDialog(self._layout_paths, self)
+        dlg.exec()
 
     @staticmethod
     def _open(path):
