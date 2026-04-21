@@ -10,7 +10,9 @@ from PyQt6.QtWidgets import (
     QFrame, QMessageBox, QFileDialog, QDialog,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QShortcut, QKeySequence, QPixmap
+from PyQt6.QtGui import QShortcut, QKeySequence, QPixmap, QIcon
+
+APP_ROOT = Path(__file__).parent.resolve()
 
 from widgets import (
     GarmentPageCard, CatalogHistoryItem,
@@ -62,10 +64,22 @@ class Sidebar(QFrame):
         brand.setFixedHeight(72)
         brand.setStyleSheet(f"background: {NAVY_LITE};")
         brand_lay = QHBoxLayout(brand)
-        brand_lay.setContentsMargins(20, 0, 20, 0)
+        brand_lay.setContentsMargins(16, 0, 16, 0)
+        brand_lay.setSpacing(10)
 
-        icon = QLabel("✦")
-        icon.setStyleSheet("color: #A8C4E8; font-size: 20px;")
+        logo_path = APP_ROOT / "app_logo.png"
+        if logo_path.exists():
+            icon = QLabel()
+            pix = QPixmap(str(logo_path)).scaled(
+                36, 36,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            icon.setPixmap(pix)
+            icon.setStyleSheet("border: none; background: transparent;")
+        else:
+            icon = QLabel("✦")
+            icon.setStyleSheet("color: #A8C4E8; font-size: 20px;")
         title = QLabel("Catalog Studio")
         title.setStyleSheet("color: white; font-size: 15px; font-weight: 700;")
         brand_lay.addWidget(icon)
@@ -75,7 +89,7 @@ class Sidebar(QFrame):
         section_lbl = QLabel("PREVIOUS CATALOGS")
         section_lbl.setContentsMargins(20, 18, 20, 8)
         section_lbl.setStyleSheet(
-            "color: #A8C4E8; font-size: 10px; font-weight: 700; letter-spacing: 1px;"
+            "color: #FFFFFF; font-size: 10px; font-weight: 700; letter-spacing: 1px;"
         )
 
         self.history_scroll = QScrollArea()
@@ -180,7 +194,7 @@ class WorkArea(QWidget):
             QLineEdit:focus {{ border-color: {ACCENT}; }}
         """)
 
-        self.gen_btn = QPushButton("  ⬇  Generate PDF")
+        self.gen_btn = QPushButton("Generate PDF")
         self.gen_btn.setFixedHeight(40)
         self.gen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.gen_btn.setStyleSheet(self._gen_btn_style())
@@ -391,7 +405,7 @@ class WorkArea(QWidget):
             return
 
         self.gen_btn.setEnabled(False)
-        self.gen_btn.setText("  ⏳  Generating…")
+        self.gen_btn.setText("Generating…")
         self.status_label.setText("Processing images…")
 
         title = self.title_input.text().strip()
@@ -402,7 +416,7 @@ class WorkArea(QWidget):
 
     def _on_success(self, pdf_path: str, layout_paths: list):
         self.gen_btn.setEnabled(True)
-        self.gen_btn.setText("  ⬇  Generate PDF")
+        self.gen_btn.setText("Generate PDF")
         self.status_label.setText("✓ Catalog generated!")
 
         thumb_path = layout_paths[0] if layout_paths else ""
@@ -413,7 +427,7 @@ class WorkArea(QWidget):
 
     def _on_failure(self, error: str):
         self.gen_btn.setEnabled(True)
-        self.gen_btn.setText("  ⬇  Generate PDF")
+        self.gen_btn.setText("Generate PDF")
         self.status_label.setText("⚠ Generation failed")
         QMessageBox.critical(self, "Generation Failed",
                              f"Could not generate catalog:\n\n{error}")
@@ -636,7 +650,10 @@ class _SuccessDialog(QMessageBox):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Garment Catalog Studio")
+        self.setWindowTitle("Catalog Studio")
+        logo = APP_ROOT / "app_logo.png"
+        if logo.exists():
+            self.setWindowIcon(QIcon(str(logo)))
         self.setMinimumSize(1100, 720)
         self.resize(1280, 800)
 
