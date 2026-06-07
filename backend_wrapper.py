@@ -4,7 +4,13 @@ import importlib
 import datetime
 from pathlib import Path
 
-APP_ROOT   = Path(__file__).parent.resolve()
+# when frozen by PyInstaller, __file__ lives inside _internal/; the exe itself
+# (and catalog_automation.py) lives one level up — use sys.executable for that.
+APP_ROOT = (
+    Path(sys.executable).parent.resolve()
+    if getattr(sys, "frozen", False)
+    else Path(__file__).parent.resolve()
+)
 INPUT_DIR  = APP_ROOT / "temp_uploads"
 STAGE_DIR  = INPUT_DIR / "staged"
 OUTPUT_DIR = APP_ROOT / "output"
@@ -156,6 +162,13 @@ def _load_backend():
     app_root_str = str(APP_ROOT)
     if app_root_str not in sys.path:
         sys.path.insert(0, app_root_str)
+
+    # when frozen, _internal holds bundled packages (rembg, onnxruntime, etc.)
+    # make sure catalog_automation.py can find them
+    if getattr(sys, "frozen", False):
+        internal = str(getattr(sys, "_MEIPASS", APP_ROOT))
+        if internal not in sys.path:
+            sys.path.insert(0, internal)
 
     # force reload so the path patches below always take effect
     if "catalog_automation" in sys.modules:

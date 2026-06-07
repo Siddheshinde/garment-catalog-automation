@@ -14,14 +14,48 @@ from reportlab.lib.utils import ImageReader
 import google.generativeai as genai
 from collections import defaultdict
 
+import traceback
+import datetime
+import cv2
+import numpy as np
+
+# Always-on debug log — written next to catalog_automation.py
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog_debug.log")
+
+def _log(msg):
+    try:
+        with open(_LOG_PATH, "a") as f:
+            f.write(f"[{datetime.datetime.now():%H:%M:%S}] {msg}\n")
+    except Exception:
+        pass
+
+import sys as _sys
+_log("=" * 60)
+_log(f"catalog_automation.py loaded | frozen={getattr(_sys, 'frozen', False)}")
+_log(f"__file__={__file__}")
+_log(f"sys.executable={_sys.executable}")
+_log(f"sys.path={_sys.path[:5]}")  # first 5 entries
+
 # Try to import rembg for background removal
 try:
-    from rembg import remove
-    REMBG_AVAILABLE = True
-    print("✓ AI Background Removal: ENABLED")
-except ImportError:
+    from rembg import remove as _rembg_remove
+    _log("rembg import: SUCCESS")
+    # Smoke-test: actually call remove() on a tiny image so we know the ONNX session loads
+    try:
+        from PIL import Image as _T
+        _result = _rembg_remove(_T.new("RGB", (4, 4), (200, 200, 200)))
+        del _T, _result
+        REMBG_AVAILABLE = True
+        _log("rembg smoke test: PASSED — background removal fully operational")
+        print("✓ AI Background Removal: ENABLED")
+    except Exception as _se:
+        REMBG_AVAILABLE = False
+        _log(f"rembg smoke test: FAILED — {_se}\n{traceback.format_exc()}")
+        print("⚠ rembg session failed, will use OpenCV fallback")
+except Exception as _e:
     REMBG_AVAILABLE = False
-    print("⚠ AI Background Removal: DISABLED (install with: pip install rembg)")
+    _log(f"rembg import: FAILED — {_e}\n{traceback.format_exc()}")
+    print("⚠ rembg not available, will use OpenCV fallback")
 
 # ============== CONFIGURATION ==============
 from dotenv import load_dotenv
@@ -84,43 +118,77 @@ def organize_images(input_folder):
 
 # ============== AUTO-ORIENTATION CORRECTION ==============
 def fix_orientation(img):
-    """
-    Correct image orientation using EXIF data and straighten if tilted.
-    This fixes:
-      1. EXIF rotation tags (most common cause of tilted phone photos)
-      2. Applies ImageOps.exif_transpose for full EXIF correction
-    """
+    """Correct image orientation using EXIF data only — no heuristic rotation."""
     try:
-        # Primary fix: use Pillow's built-in EXIF transpose (handles all 8 EXIF orientations)
         img = ImageOps.exif_transpose(img)
-        print(f"         ✅ EXIF orientation corrected")
-    except Exception as e:
-        print(f"         ⚠ EXIF correction skipped: {e}")
-
-    # Secondary fix: if image is wider than tall for a garment photo, rotate 90°
-    # (catches cases where phone was held landscape when shooting a hanging garment)
-    if img.width > img.height * 1.2:
-        img = img.rotate(90, expand=True)
-        print(f"         ↩ Rotated landscape→portrait (garment photo)")
-
+    except Exception:
+        pass
     return img
 
-# ============== AI BACKGROUND REMOVAL ==============
-def remove_background_ai(img):
-    """Remove background using AI (rembg library)"""
-    if not REMBG_AVAILABLE:
-        print("      ⚠ Skipping AI removal (rembg not installed)")
-        return img
+# ============== BACKGROUND REMOVAL ==============
+
+def _log_error(msg):
+    """Write errors to a log file next to the script so we can debug from the exe."""
     try:
-        output = remove(img)
-        white_bg = Image.new('RGB', output.size, (255, 255, 255))
-        if output.mode == 'RGBA':
-            white_bg.paste(output, (0, 0), output)
-        else:
-            white_bg = output.convert('RGB')
-        return white_bg
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rembg_error.log")
+        with open(log_path, "a") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
+def remove_background_cv(img):
+    """OpenCV GrabCut background removal — no ML required, works in frozen exe."""
+    img_rgb = np.array(img.convert("RGB"))
+    h, w = img_rgb.shape[:2]
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+    mask     = np.zeros((h, w), np.uint8)
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+
+    # Rect covers the central 86% so top/bottom edges (hanger area) start as background
+    mx, my = int(w * 0.07), int(h * 0.04)
+    rect = (mx, my, w - 2 * mx, h - 2 * my)
+    cv2.grabCut(img_bgr, mask, rect, bgd_model, fgd_model, 10, cv2.GC_INIT_WITH_RECT)
+
+    fg_mask = np.where((mask == 2) | (mask == 0), 0, 1).astype(np.uint8)
+
+    # Also force-white any very bright pixel (catches plain white/cream backdrops)
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    _, bright = cv2.threshold(gray, 230, 255, cv2.THRESH_BINARY)
+    fg_mask[bright == 255] = 0
+
+    result = img_rgb.copy()
+    result[fg_mask == 0] = [255, 255, 255]
+    return Image.fromarray(result)
+
+
+def remove_background_ai(img):
+    """Try rembg first; fall back to OpenCV GrabCut if it fails."""
+    if REMBG_AVAILABLE:
+        try:
+            output = _rembg_remove(img)
+            white_bg = Image.new("RGB", output.size, (255, 255, 255))
+            if output.mode == "RGBA":
+                white_bg.paste(output, (0, 0), output)
+            else:
+                white_bg = output.convert("RGB")
+            print("      ✅ rembg background removal OK")
+            return white_bg
+        except Exception as e:
+            err = traceback.format_exc()
+            _log_error(f"rembg failed: {e}\n{err}")
+            print(f"      ⚠ rembg failed ({e}), falling back to OpenCV")
+
+    # OpenCV fallback — always available in the exe
+    try:
+        result = remove_background_cv(img)
+        print("      ✅ OpenCV background removal OK")
+        return result
     except Exception as e:
-        print(f"      ⚠ AI removal failed: {e}")
+        _log_error(f"OpenCV fallback failed: {e}\n{traceback.format_exc()}")
+        print(f"      ⚠ OpenCV fallback failed: {e}")
         return img
 
 # ============== ENHANCEMENT ==============
@@ -169,13 +237,15 @@ def enhance_image_ultimate(image_path, garment_id, view_type):
             print(f"       🧹 Light smoothing...")
             img = smooth_wrinkles_gentle(img)
         else:
+            # Enhance colors FIRST on the original image so autocontrast reads
+            # the real pixel histogram, not a mostly-white post-removal canvas.
+            print(f"       🌈 Enhancing colors...")
+            img = enhance_colors_natural(img)
             if USE_AI_BACKGROUND_REMOVAL and REMBG_AVAILABLE:
                 print(f"       🤖 AI background removal...")
                 img = remove_background_ai(img)
             print(f"       🧹 Smoothing fabric...")
             img = smooth_wrinkles_gentle(img)
-            print(f"       🌈 Enhancing colors...")
-            img = enhance_colors_natural(img)
 
         print(f"       ✨ Final polish...")
         enhancer = ImageEnhance.Sharpness(img)
